@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamic Monday Widget</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/monday-sdk-js/dist/main.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: transparent; padding: 20px;}
+        .card { background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); padding: 20px; }
+        .metric-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; margin-bottom: 8px; border-radius: 6px; border-width: 1px; border-style: solid;}
+        .val-total { font-size: 1.5rem; font-weight: 700; color: #323338; }
+        .val-percent { font-size: 0.875rem; font-weight: 700; color: #676879; margin-left: 8px;}
+    </style>
+</head>
+<body>
+
+    <div class="max-w-5xl mx-auto card" id="widget-container">
+        <!-- Header Section -->
+        <h2 class="text-xl font-bold text-gray-800 mb-1" id="widget-title">Custom Dashboard</h2>
+        <p class="text-sm text-gray-500 mb-4" id="widget-subtitle">Configure settings in monday.com to see data</p>
+        
+        <div id="total-container" class="mb-6 hidden">
+            <span class="text-sm font-bold text-gray-500 uppercase">Total Allocation</span>
+            <div class="text-2xl font-bold text-gray-800" id="grand-total">0</div>
+        </div>
+
+        <!-- Dynamic Rows Section -->
+        <div id="dynamic-rows">
+            <div class="text-center text-gray-400 py-10">Waiting for configuration...</div>
+        </div>
+    </div>
+
+    <script>
+        const monday = window.mondaySdk();
+        let appSettings = {};
+        let rawData = [];
+
+        // 1. Listen for Settings changes (from the user clicking the gear icon)
+        monday.listen("settings", res => {
+            appSettings = res.data;
+            renderWidget();
+        });
+
+        // 2. Listen for Context (Board IDs)
+        monday.listen("context", res => {
+            const boardIds = res.data.boardIds;
+            if (boardIds && boardIds.length > 0) {
+                fetchBoardData(boardIds);
+            }
+        });
+
+        function fetchBoardData(boardIds) {
+            // Using GraphQL to fetch items and column values
+            const query = `query {
+                boards(ids: [${boardIds.join(',')}]) {
+                    items_page(limit: 500) {
+                        items {
+                            column_values {
+                                id
+                                type
+                                text
+                                value
+                                ... on StatusValue {
+                                    color
+                                    label
+                                }
+                            }
+                        }
+                    }
+                }
+            }`;
+
+            monday.api(query).then(res => {
+                const boards = res.data.boards;
+                rawData = [];
+                boards.forEach(board => {
+                    rawData = rawData.concat(board.items_page.items);
+                });
+                renderWidget();
+            });
+        }
+
+        function renderWidget() {
+            if (!rawData.length || !appSettings.x_column || !appSettings.y_column) return;
+
+            const xColId = Object.keys(appSettings.x_column)[0]; 
+            const yColId = Object.keys(appSettings.y_column)[0];
+
+            let aggregates = {};
+            let grandTotal = 0;
+
+            // Process data based on chosen columns
+            rawData.forEach(item => {
+                let xVal = "Uncategorized";
+                let color = "#eaf3ff"; // default fallback
+                let borderColor = "#c4dfff";
+                let yVal = 0;
+
+                item.column_values.forEach(col => {
+                    if (col.id === xColId) {
+                        xVal = col.text || "Uncategorized";
+                        // If it's a status column, grab Monday's native color
+                        if (col.color) {
+                            color = col.color;
+                            // Generate a slightly darker border color
+                            borderColor = col.color; 
+                        }
+                    }
+                    if (col.id === yColId) {
+                        // Clean currency formatting if present and parse
+                        yVal = parseFloat((col.text || "0").replace(/[^0-9.-]+/g,""));
+                    }
+                });
+
+                if (!aggregates[xVal]) {
+                    aggregates[xVal] = { count: 0, total: 0, color: color, border: borderColor };
+                }
+                
+                aggregates[xVal].count += 1;
+                aggregates[xVal].total += yVal;
+                grandTotal += yVal;
+            });
+
+            // Convert object to array for sorting
+            let rows = Object.keys(aggregates).map(key => ({
+                label: key,
+                ...aggregates[key]
+            }));
+
+            // Apply Sorting (Feature 8)
+            if (appSettings.sort_by === "value") {
+                rows.sort((a, b) => b.total - a.total);
+            } else if (appSettings.sort_by === "alpha") {
+                rows.sort((a, b) => a.label.localeCompare(b.label));
+            } // "custom" would rely on original board order, which requires deeper index tracking
+
+            // Render UI
+            updateDOM(rows, grandTotal);
+        }
+
+        function updateDOM(rows, grandTotal) {
+            // Feature 5: Subtitle
+            if (appSettings.subtitle_text) {
+                document.getElementById('widget-subtitle').innerText = appSettings.subtitle_text;
+            }
+
+            // Feature 6: Total Y
+            const totalContainer = document.getElementById('total-container');
+            if (appSettings.show_total) {
+                totalContainer.classList.remove('hidden');
+                document.getElementById('grand-total').innerText = formatCurrency(grandTotal);
+            } else {
+                totalContainer.classList.add('hidden');
+            }
+
+            // Feature 7: Custom item labels
+            const itemLabel = appSettings.item_label || "items";
+
+            const container = document.getElementById('dynamic-rows');
+            container.innerHTML = "";
+
+            rows.forEach(row => {
+                // Feature 2: Percentages
+                let percentStr = "";
+                if (appSettings.show_percentages && grandTotal > 0) {
+                    const pct = ((row.total / grandTotal) * 100).toFixed(0);
+                    percentStr = `<span class="val-percent">(${pct}%)</span>`;
+                }
+
+                // Feature 3 & 4: Colors and Labels natively pulled from data mapping
+                // Note: Background opacity applied to the status color for the pastel look
+                const rowHtml = `
+                    <div class="metric-row" style="background-color: ${row.color}20; border-color: ${row.color}50;">
+                        <div>
+                            <div class="font-bold text-gray-800">${row.label}</div>
+                            <div class="text-sm text-gray-600">${row.count} ${itemLabel}</div>
+                        </div>
+                        <div class="flex items-baseline">
+                            <span class="val-total">${formatCurrency(row.total)}</span>
+                            ${percentStr}
+                        </div>
+                    </div>
+                `;
+                container.innerHTML += rowHtml;
+            });
+        }
+
+        function formatCurrency(val) {
+            return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(val);
+        }
+    </script>
+</body>
+</html>
