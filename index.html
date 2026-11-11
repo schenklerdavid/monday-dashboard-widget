@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dynamic Monday Widget - Custom Colors</title>
+    <title>Dynamic Monday Widget - V5</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/monday-sdk-js/dist/main.js"></script>
     <style>
@@ -17,7 +17,6 @@
 <body>
 
     <div class="max-w-5xl mx-auto card" id="widget-container">
-        <!-- Header Section -->
         <h2 class="text-xl font-bold text-gray-800 mb-1" id="widget-title">Custom Dashboard</h2>
         <p class="text-sm text-gray-500 mb-4" id="widget-subtitle">Configure settings in monday.com to see data</p>
         
@@ -26,7 +25,6 @@
             <div class="text-2xl font-bold text-gray-800" id="grand-total">0</div>
         </div>
 
-        <!-- Dynamic Rows Section -->
         <div id="dynamic-rows">
             <div class="text-center text-gray-400 py-10">Waiting for configuration...</div>
         </div>
@@ -37,13 +35,11 @@
         let appSettings = {};
         let rawData = [];
 
-        // 1. Listen for Settings changes
         monday.listen("settings", res => {
             appSettings = res.data;
             renderWidget();
         });
 
-        // 2. Listen for Context
         monday.listen("context", res => {
             const boardIds = res.data.boardIds;
             if (boardIds && boardIds.length > 0) {
@@ -63,6 +59,7 @@
                                 value
                                 ... on StatusValue {
                                     color
+                                    index
                                 }
                             }
                         }
@@ -89,16 +86,17 @@
             let aggregates = {};
             let grandTotal = 0;
 
-            // Process data based on chosen columns
             rawData.forEach(item => {
                 let xVal = "Uncategorized";
-                let color = "#c4dfff"; // default solid hex fallback for text columns
+                let color = "#c4dfff"; 
                 let yVal = 0;
+                let statusIndex = 999; 
 
                 item.column_values.forEach(col => {
                     if (col.id === xColId) {
                         xVal = col.text || "Uncategorized";
-                        if (col.color) { color = col.color; } // Grab native monday color if it's a status
+                        if (col.color) { color = col.color; }
+                        if (col.index !== undefined && col.index !== null) { statusIndex = col.index; }
                     }
                     if (col.id === yColId) {
                         yVal = parseFloat((col.text || "0").replace(/[^0-9.-]+/g,""));
@@ -106,7 +104,7 @@
                 });
 
                 if (!aggregates[xVal]) {
-                    aggregates[xVal] = { count: 0, total: 0, nativeColor: color };
+                    aggregates[xVal] = { count: 0, total: 0, nativeColor: color, sortIndex: statusIndex };
                 }
                 
                 aggregates[xVal].count += 1;
@@ -114,20 +112,19 @@
                 grandTotal += yVal;
             });
 
-            // Convert object to array for sorting
             let rows = Object.keys(aggregates).map(key => ({
                 label: key,
                 ...aggregates[key]
             }));
 
-            // Apply Sorting
             if (appSettings.sort_by === "value") {
                 rows.sort((a, b) => b.total - a.total);
             } else if (appSettings.sort_by === "alpha") {
                 rows.sort((a, b) => a.label.localeCompare(b.label));
-            } 
+            } else if (appSettings.sort_by === "custom") {
+                rows.sort((a, b) => a.sortIndex - b.sortIndex);
+            }
 
-            // Handle Custom Color Palette Override
             let customPalette = [];
             if (appSettings.custom_colors && appSettings.custom_colors.trim() !== "") {
                 customPalette = appSettings.custom_colors.split(',').map(c => c.trim());
@@ -135,23 +132,19 @@
 
             rows.forEach((row, index) => {
                 let baseColor = row.nativeColor;
-                
-                // Override with custom palette if provided
                 if (customPalette.length > 0) {
                     baseColor = customPalette[index % customPalette.length];
                 }
 
-                // Apply opacity for the pastel look if it's a standard #HEX color
                 if (baseColor.startsWith('#') && baseColor.length === 7) {
-                    row.bgColor = baseColor + "20"; // ~12% opacity background
-                    row.borderColor = baseColor + "50"; // ~31% opacity border
+                    row.bgColor = baseColor + "20"; 
+                    row.borderColor = baseColor + "50"; 
                 } else {
                     row.bgColor = baseColor;
                     row.borderColor = baseColor;
                 }
             });
 
-            // Render UI
             updateDOM(rows, grandTotal);
         }
 
@@ -160,10 +153,20 @@
                 document.getElementById('widget-subtitle').innerText = appSettings.subtitle_text;
             }
 
+            // Extract native monday.com Units object settings
+            let unitSymbol = "";
+            let unitDirection = "left";
+            
+            if (appSettings.unit) {
+                // Prioritize custom typed unit; fallback to the symbol button
+                unitSymbol = appSettings.unit.custom_unit || appSettings.unit.symbol || "";
+                unitDirection = appSettings.unit.direction || "left";
+            }
+
             const totalContainer = document.getElementById('total-container');
             if (appSettings.show_total) {
                 totalContainer.classList.remove('hidden');
-                document.getElementById('grand-total').innerText = formatCurrency(grandTotal);
+                document.getElementById('grand-total').innerText = formatCurrency(grandTotal, unitSymbol, unitDirection);
             } else {
                 totalContainer.classList.add('hidden');
             }
@@ -186,7 +189,7 @@
                             <div class="text-sm text-gray-600">${row.count} ${itemLabel}</div>
                         </div>
                         <div class="flex items-baseline">
-                            <span class="val-total">${formatCurrency(row.total)}</span>
+                            <span class="val-total">${formatCurrency(row.total, unitSymbol, unitDirection)}</span>
                             ${percentStr}
                         </div>
                     </div>
@@ -195,8 +198,11 @@
             });
         }
 
-        function formatCurrency(val) {
-            return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(val);
+        function formatCurrency(val, symbol, direction) {
+            const formattedNum = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(val);
+            if (!symbol) return formattedNum;
+            // Apply symbol to left or right based on toggle setting
+            return direction === 'right' ? `${formattedNum}${symbol}` : `${symbol}${formattedNum}`;
         }
     </script>
 </body>
